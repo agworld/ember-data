@@ -1,4 +1,4 @@
-var get = Ember.get, set = Ember.set, getPath = Ember.getPath;
+var get = Ember.get, set = Ember.set;
 
 require("ember-data/system/model/model");
 
@@ -25,12 +25,12 @@ var hasAssociation = function(type, options) {
         ids, id, association;
 
     if (typeof type === 'string') {
-      type = getPath(this, type, false) || getPath(window, type);
+      type = get(this, type, false) || get(window, type);
     }
 
     key = options.key || get(this, 'namingConvention').keyToJSONKey(key);
     ids = findRecord(store, type, data, key);
-    association = store.findMany(type, ids);
+    association = store.findMany(type, ids || []);
     set(association, 'parentRecord', this);
 
     return association;
@@ -38,6 +38,6 @@ var hasAssociation = function(type, options) {
 };
 
 DS.hasMany = function(type, options) {
-  ember_assert("The type passed to DS.hasMany must be defined", !!type);
+  Ember.assert("The type passed to DS.hasMany must be defined", !!type);
   return hasAssociation(type, options);
 };

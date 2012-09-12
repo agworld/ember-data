@@ -1,4 +1,4 @@
-var get = Ember.get, set = Ember.set, getPath = Ember.getPath, guidFor = Ember.guidFor;
+var get = Ember.get, set = Ember.set, guidFor = Ember.guidFor;
 
 /**
   This file encapsulates the various states that a record can transition
@@ -27,7 +27,7 @@ var get = Ember.get, set = Ember.set, getPath = Ember.getPath, guidFor = Ember.g
   string. You can determine a record's current state by getting its manager's
   current state path:
 
-        record.getPath('stateManager.currentState.path');
+        record.get('stateManager.currentState.path');
         //=> "created.uncommitted"
 
   The `DS.Model` states are themselves stateless. What we mean is that,
@@ -113,7 +113,7 @@ var get = Ember.get, set = Ember.set, getPath = Ember.getPath, guidFor = Ember.g
   state in a more user-friendly way than examining its state path. For example,
   instead of doing this:
 
-      var statePath = record.getPath('stateManager.currentState.path');
+      var statePath = record.get('stateManager.currentState.path');
       if (statePath === 'created.inFlight') {
         doSomething();
       }
@@ -280,7 +280,7 @@ var waitingOn = function(manager, object) {
 // super points to the class definition.
 var Uncommitted = Ember.Mixin.create({
   setProperty: setProperty,
-  setAssociation: setAssociation,
+  setAssociation: setAssociation
 });
 
 // These mixins are mixed into substates of the concrete
@@ -340,11 +340,6 @@ var DirtyState = DS.State.extend({
       });
     },
 
-    exit: function(manager) {
-      var record = get(manager, 'record');
-      manager.send('invokeLifecycleCallbacks', record);
-    },
-
     // EVENTS
     deleteRecord: Ember.K,
 
@@ -355,6 +350,17 @@ var DirtyState = DS.State.extend({
 
     willCommit: function(manager) {
       manager.goToState('inFlight');
+    },
+
+    becameInvalid: function(manager) {
+      var dirtyType = get(this, 'dirtyType'),
+          record = get(manager, 'record');
+
+      record.withTransaction(function (t) {
+        t.recordBecameInFlight(dirtyType, record);
+      });
+
+      manager.goToState('invalid');
     },
 
     rollback: function(manager) {
@@ -368,7 +374,7 @@ var DirtyState = DS.State.extend({
         t.recordBecameClean(dirtyType, record);
       });
 
-      manager.goToState('loaded');
+      manager.goToState('saved');
     }
   }, Uncommitted),
 
@@ -385,20 +391,35 @@ var DirtyState = DS.State.extend({
           record = get(manager, 'record');
 
       record.withTransaction(function (t) {
-        t.recordBecameClean(dirtyType, record);
+        t.recordBecameInFlight(dirtyType, record);
       });
     },
 
     // EVENTS
     didCommit: function(manager) {
-      manager.goToState('loaded');
+      var dirtyType = get(this, 'dirtyType'),
+          record = get(manager, 'record');
+
+      record.withTransaction(function(t) {
+        t.recordBecameClean('inflight', record);
+      });
+
+      manager.goToState('saved');
+      manager.send('invokeLifecycleCallbacks', dirtyType);
     },
 
     becameInvalid: function(manager, errors) {
       var record = get(manager, 'record');
 
       set(record, 'errors', errors);
+
       manager.goToState('invalid');
+      manager.send('invokeLifecycleCallbacks');
+    },
+
+    becameError: function(manager) {
+      manager.goToState('error');
+      manager.send('invokeLifecycleCallbacks');
     },
 
     didChangeData: didChangeData
@@ -494,8 +515,13 @@ var DirtyState = DS.State.extend({
       },
 
       willCommit: function(manager) {
-        var dirtyType = get(this, 'dirtyType');
-        manager.goToState(dirtyType + '.inFlight');
+        var record = get(manager, 'record'),
+            pendingQueue = get(record, 'pendingQueue');
+
+        if (isEmptyObject(pendingQueue)) {
+          var dirtyType = get(this, 'dirtyType');
+          manager.goToState(dirtyType + '.inFlight');
+        }
       }
     })
   }),
@@ -506,6 +532,14 @@ var DirtyState = DS.State.extend({
   invalid: DS.State.extend({
     // FLAGS
     isValid: false,
+
+    exit: function(manager) {
+      var record = get(manager, 'record');
+
+      record.withTransaction(function (t) {
+        t.recordBecameClean('inflight', record);
+      });
+    },
 
     // EVENTS
     deleteRecord: function(manager) {
@@ -521,15 +555,25 @@ var DirtyState = DS.State.extend({
           errors = get(record, 'errors'),
           key = context.key;
 
-      delete errors[key];
+      set(errors, key, null);
 
       if (!hasDefinedProperties(errors)) {
         manager.send('becameValid');
       }
     },
 
+    rollback: function(manager) {
+      manager.send('becameValid');
+      manager.send('rollback');
+    },
+
     becameValid: function(manager) {
       manager.goToState('uncommitted');
+    },
+
+    invokeLifecycleCallbacks: function(manager) {
+      var record = get(manager, 'record');
+      record.trigger('becameInvalid', record);
     }
   })
 });
@@ -542,21 +586,11 @@ var createdState = DirtyState.create({
   dirtyType: 'created',
 
   // FLAGS
-  isNew: true,
-
-  // EVENTS
-  invokeLifecycleCallbacks: function(manager, record) {
-    record.fire('didCreate');
-  }
+  isNew: true
 });
 
 var updatedState = DirtyState.create({
-  dirtyType: 'updated',
-
-  // EVENTS
-  invokeLifecycleCallbacks: function(manager, record) {
-    record.fire('didUpdate');
-  }
+  dirtyType: 'updated'
 });
 
 // The created.uncommitted state and created.pending.uncommitted share
@@ -577,6 +611,15 @@ createdState.states.uncommitted.reopen({
 // some logic defined in UpdatedUncommitted.
 updatedState.states.uncommitted.reopen(UpdatedUncommitted);
 updatedState.states.pending.states.uncommitted.reopen(UpdatedUncommitted);
+updatedState.states.inFlight.reopen({
+  didSaveData: function(manager) {
+    var record = get(manager, 'record'),
+        data = get(record, 'data');
+
+    data.saveData();
+    data.adapterDidUpdate();
+  }
+});
 
 var states = {
   rootState: Ember.State.create({
@@ -620,7 +663,7 @@ var states = {
       // TRANSITIONS
       exit: function(manager) {
         var record = get(manager, 'record');
-        record.fire('didLoad');
+        record.trigger('didLoad');
       },
 
       // EVENTS
@@ -648,6 +691,7 @@ var states = {
       // If there are no local changes to a record, it remains
       // in the `saved` state.
       saved: DS.State.create({
+
         // EVENTS
         setProperty: function(manager, context) {
           setProperty(manager, context);
@@ -668,6 +712,15 @@ var states = {
         waitingOn: function(manager, object) {
           waitingOn(manager, object);
           manager.goToState('updated.pending');
+        },
+
+        invokeLifecycleCallbacks: function(manager, dirtyType) {
+          var record = get(manager, 'record');
+          if (dirtyType === 'created') {
+            record.trigger('didCreate', record);
+          } else {
+            record.trigger('didUpdate', record);
+          }
         }
       }),
 
@@ -738,17 +791,25 @@ var states = {
         isSaving: true,
 
         // TRANSITIONS
-        exit: function(stateManager) {
-          var record = get(stateManager, 'record');
+        enter: function(manager) {
+          var record = get(manager, 'record');
 
-          record.withTransaction(function(t) {
-            t.recordBecameClean('deleted', record);
+          record.withTransaction(function (t) {
+            t.recordBecameInFlight('deleted', record);
           });
         },
 
         // EVENTS
         didCommit: function(manager) {
+          var record = get(manager, 'record');
+
+          record.withTransaction(function(t) {
+            t.recordBecameClean('inflight', record);
+          });
+
           manager.goToState('saved');
+
+          manager.send('invokeLifecycleCallbacks');
         }
       }),
 
@@ -757,7 +818,12 @@ var states = {
       // of `deleted`.
       saved: DS.State.create({
         // FLAGS
-        isDirty: false
+        isDirty: false,
+
+        invokeLifecycleCallbacks: function(manager) {
+          var record = get(manager, 'record');
+          record.trigger('didDelete', record);
+        }
       })
     }),
 
@@ -765,7 +831,14 @@ var states = {
     // error saving a record, the record enters the `error`
     // state.
     error: DS.State.create({
-      isError: true
+      isError: true,
+
+      // EVENTS
+
+      invokeLifecycleCallbacks: function(manager) {
+        var record = get(manager, 'record');
+        record.trigger('becameError', record);
+      }
     })
   })
 };

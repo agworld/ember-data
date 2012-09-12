@@ -1,4 +1,4 @@
-## Ember Data
+## Ember Data [![Build Status](https://secure.travis-ci.org/emberjs/data.png?branch=master)](http://travis-ci.org/emberjs/data)
 
 Ember Data is a library for loading models from a persistence layer (such as
 a JSON API), updating those models, then saving the changes. It provides many
@@ -17,6 +17,10 @@ Yes.
 
 No. Breaking changes, indexed by date, are listed in
 [`BREAKING_CHANGES.md`](https://github.com/emberjs/data/blob/master/BREAKING_CHANGES.md).
+
+#### Getting ember-data
+
+Currently you must build ember-data.js yourself.  Clone the repository, run `bundle` then `rake dist`. You'll find ember-data.js in the `dist` directory.
 
 #### Roadmap
 
@@ -58,7 +62,7 @@ App.store = DS.Store.create({
 
 The `RESTAdapter` supports the following options:
 
-* `bulkCommit` (default: true): If your REST API does not support bulk
+* `bulkCommit` (default: false): If your REST API does not support bulk
   operations, you can turn them off by setting `bulkCommit` to false.
 
 * `namespace` (default: undefined): A leading URL component under which all
@@ -138,39 +142,11 @@ DS.Model.extend({
 Models can be associated with other models. Ember Data includes several
 built-in types to help you define how your models relate to each other.
 
-#### Has One
-
-A `hasOne` association declares that a model is associated with exactly
-one other model. For example, imagine we're writing a blog application that
-allows authors to post entries. Each author has a profile associated with
-their account that is displayed when visitors want to learn more about them.
-
-```javascript
-App.Profile = DS.Model.extend({
-  about: DS.attr('string'),
-  postCount: DS.attr('number')
-});
-
-App.Author = DS.Model.extend({
-  profile: DS.hasOne('App.Profile'),
-  name: DS.attr('string')
-});
-```
-
-Now, when we have an `Author` record, we can easily find its related `Profile`:
-
-```javascript
-var author = App.store.find(App.Author, 1);
-author.get('name'); // "Timothy Leary"
-author.get('profile'); // App.Profile
-author.getPath('profile.postCount'); // 1969
-```
-
 #### Belongs To
 
-Similar to `hasOne`, `belongsTo` sets up a one-to-one relationship from one model
-to another. Let's revise the example above so that, in addition to being able
-to find an author's profile, we can find the author associated with a profile:
+`belongsTo` sets up a one-to-one relationship from one model to
+another. In the following example, in addition to being able to find an
+author's profile, we can also find the author associated with a profile:
 
 ```javascript
 App.Profile = DS.Model.extend({
@@ -180,18 +156,25 @@ App.Profile = DS.Model.extend({
 });
 
 App.Author = DS.Model.extend({
-  profile: DS.hasOne('App.Profile'),
+  profile: DS.belongsTo('App.Profile'),
   name: DS.attr('string')
 });
 ```
 
-So, when should you use `hasOne` and when should you use `belongsTo`? The difference
-is where the information about the relationship is stored at the persistence layer.
+For now, please make sure you are using `belongsTo` on both ends of
+one-to-one relationships, and not `hasOne`.
 
-The record with the `belongsTo` relationship will save changes to the association
-on itself. Conversely, the record with the `hasOne` relationship asks the persistence
-layer what record belongs to it. If the relationship changes, only the record with
-the `belongsTo` relationship must be saved.
+#### Has One
+
+Previously, the `DS.hasOne` and `DS.belongsTo` associations were aliased
+to one another. Now, `DS.belongsTo` remains but `DS.hasOne` has been
+removed. We are planning on having different semantics for `DS.hasOne`
+at a later date.
+
+Primarily, the semantic difference between the two are related to which
+record should be marked as dirty when the relationship changes. To
+ensure that the semantics of your application match the framework,
+please ensure that you are using `DS.belongsTo` at this time.
 
 #### Has Many
 
@@ -294,13 +277,17 @@ like this:
     "name": "Tom Dale",
     "profile": {
       "id": 1,
-      about: "Tom Dale is a software engineer that drinks too much beer.",
-      postCount: 1984,
-      author_id: 1
+      "about": "Tom Dale is a software engineer that drinks too much beer.",
+      "postCount": 1984,
+      "author_id": 1
     }
   }]
 }
 ```
+
+If you do this, note that `Profile.find(1)` will still trigger an Ajax request
+until you access the embedded profile record for the first time
+(`Author.find(1).get('profile')`).
 
 Another option is to use the format described above (with the ID embedded),
 then "sideloading" the records. For example, we could represent the
@@ -316,9 +303,9 @@ entirety of the association above like this:
 
   "profiles": [{
     "id": 1,
-    about: "Tom Dale is a software engineer that drinks too much beer.",
-    postCount: 1984,
-    author_id: 1
+    "about": "Tom Dale is a software engineer that drinks too much beer.",
+    "postCount": 1984,
+    "author_id": 1
   }]
 }
 ```
@@ -783,6 +770,7 @@ DS.Adapter.create({
 
         jQuery.ajax({
             url: url.fmt(model.get('id')),
+            data: model.get('data'),
             dataType: 'json',
             type: 'PUT',
 
@@ -921,7 +909,7 @@ App.people = App.store.find(App.Person, { firstName: "Tom" });
 
 You will get back a `ModelArray` that is currently empty. Ember Data will then
 ask your adapter to populate the `ModelArray` with records, which will usually make an Ajax
-request. Howver, you can immediately refer to it in your templates:
+request. However, you can immediately refer to it in your templates:
 
 ```html
 <ul>

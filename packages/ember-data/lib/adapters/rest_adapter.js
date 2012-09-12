@@ -2,9 +2,11 @@ require("ember-data/core");
 require('ember-data/system/adapters');
 /*global jQuery*/
 
-var get = Ember.get, set = Ember.set, getPath = Ember.getPath;
+var get = Ember.get, set = Ember.set;
 
 DS.RESTAdapter = DS.Adapter.extend({
+  bulkCommit: false,
+	
   createRecord: function(store, type, record) {
     var root = this.rootForType(type);
 
@@ -13,11 +15,18 @@ DS.RESTAdapter = DS.Adapter.extend({
 
     this.ajax(this.buildURL(root), "POST", {
       data: data,
+      context: this,
       success: function(json) {
-        this.sideload(store, type, json, root);
-        store.didCreateRecord(record, json[root]);
+        this.didCreateRecord(store, type, record, json);
       }
     });
+  },
+
+  didCreateRecord: function(store, type, record, json) {
+    var root = this.rootForType(type);
+
+    this.sideload(store, type, json, root);
+    store.didCreateRecord(record, json[root]);
   },
 
   createRecords: function(store, type, records) {
@@ -35,12 +44,18 @@ DS.RESTAdapter = DS.Adapter.extend({
 
     this.ajax(this.buildURL(root), "POST", {
       data: data,
-
+      context: this,
       success: function(json) {
-        this.sideload(store, type, json, plural);
-        store.didCreateRecords(type, records, json[plural]);
+        this.didCreateRecords(store, type, records, json);
       }
     });
+  },
+
+  didCreateRecords: function(store, type, records, json) {
+    var root = this.pluralize(this.rootForType(type));
+
+    this.sideload(store, type, json, root);
+    store.didCreateRecords(type, records, json[root]);
   },
 
   updateRecord: function(store, type, record) {
@@ -52,11 +67,18 @@ DS.RESTAdapter = DS.Adapter.extend({
 
     this.ajax(this.buildURL(root, id), "PUT", {
       data: data,
+      context: this,
       success: function(json) {
-        this.sideload(store, type, json, root);
-        store.didUpdateRecord(record, json && json[root]);
+        this.didUpdateRecord(store, type, record, json);
       }
     });
+  },
+
+  didUpdateRecord: function(store, type, record, json) {
+    var root = this.rootForType(type);
+
+    this.sideload(store, type, json, root);
+    store.didUpdateRecord(record, json && json[root]);
   },
 
   updateRecords: function(store, type, records) {
@@ -74,11 +96,18 @@ DS.RESTAdapter = DS.Adapter.extend({
 
     this.ajax(this.buildURL(root, "bulk"), "PUT", {
       data: data,
+      context: this,
       success: function(json) {
-        this.sideload(store, type, json, plural);
-        store.didUpdateRecords(records, json[plural]);
+        this.didUpdateRecords(store, type, records, json);
       }
     });
+  },
+
+  didUpdateRecords: function(store, type, records, json) {
+    var root = this.pluralize(this.rootForType(type));
+
+    this.sideload(store, type, json, root);
+    store.didUpdateRecords(records, json[root]);
   },
 
   deleteRecord: function(store, type, record) {
@@ -86,11 +115,16 @@ DS.RESTAdapter = DS.Adapter.extend({
     var root = this.rootForType(type);
 
     this.ajax(this.buildURL(root, id), "DELETE", {
+      context: this,
       success: function(json) {
-        if (json) { this.sideload(store, type, json); }
-        store.didDeleteRecord(record);
+        this.didDeleteRecord(store, type, record, json);
       }
     });
+  },
+
+  didDeleteRecord: function(store, type, record, json) {
+    if (json) { this.sideload(store, type, json); }
+    store.didDeleteRecord(record);
   },
 
   deleteRecords: function(store, type, records) {
@@ -108,11 +142,16 @@ DS.RESTAdapter = DS.Adapter.extend({
 
     this.ajax(this.buildURL(root, 'bulk'), "DELETE", {
       data: data,
+      context: this,
       success: function(json) {
-        if (json) { this.sideload(store, type, json); }
-        store.didDeleteRecords(records);
+        this.didDeleteRecords(store, type, records, json);
       }
     });
+  },
+
+  didDeleteRecords: function(store, type, records, json) {
+    if (json) { this.sideload(store, type, json); }
+    store.didDeleteRecords(records);
   },
 
   find: function(store, type, id) {
@@ -120,8 +159,8 @@ DS.RESTAdapter = DS.Adapter.extend({
 
     this.ajax(this.buildURL(root, id), "GET", {
       success: function(json) {
-        store.load(type, json[root]);
         this.sideload(store, type, json, root);
+        store.load(type, json[root]);
       }
     });
   },
@@ -132,8 +171,8 @@ DS.RESTAdapter = DS.Adapter.extend({
     this.ajax(this.buildURL(root), "GET", {
       data: { ids: ids },
       success: function(json) {
-        store.loadMany(type, ids, json[plural]);
         this.sideload(store, type, json, plural);
+        store.loadMany(type, json[plural]);
       }
     });
   },
@@ -143,8 +182,8 @@ DS.RESTAdapter = DS.Adapter.extend({
 
     this.ajax(this.buildURL(root), "GET", {
       success: function(json) {
-        store.loadMany(type, json[plural]);
         this.sideload(store, type, json, plural);
+        store.loadMany(type, json[plural]);
       }
     });
   },
@@ -155,8 +194,8 @@ DS.RESTAdapter = DS.Adapter.extend({
     this.ajax(this.buildURL(root), "GET", {
       data: query,
       success: function(json) {
-        recordArray.load(json[plural]);
         this.sideload(store, type, json, plural);
+        recordArray.load(json[plural]);
       }
     });
   },
@@ -195,7 +234,9 @@ DS.RESTAdapter = DS.Adapter.extend({
   },
 
   sideload: function(store, type, json, root) {
-    var sideloadedType, mappings;
+    var sideloadedType, mappings, loaded = {};
+
+    loaded[root] = true;
 
     for (var prop in json) {
       if (!json.hasOwnProperty(prop)) { continue; }
@@ -205,14 +246,35 @@ DS.RESTAdapter = DS.Adapter.extend({
 
       if (!sideloadedType) {
         mappings = get(this, 'mappings');
-        ember_assert("Your server returned a hash with the key " + prop + " but you have no mappings", !!mappings);
+        Ember.assert("Your server returned a hash with the key " + prop + " but you have no mappings", !!mappings);
 
         sideloadedType = get(mappings, prop);
-        ember_assert("Your server returned a hash with the key " + prop + " but you have no mapping for it", !!sideloadedType);
+
+        if (typeof sideloadedType === 'string') {
+          sideloadedType = get(window, sideloadedType);
+        }
+
+        Ember.assert("Your server returned a hash with the key " + prop + " but you have no mapping for it", !!sideloadedType);
       }
 
-      this.loadValue(store, sideloadedType, json[prop]);
+      this.sideloadAssociations(store, sideloadedType, json, prop, loaded);
     }
+  },
+
+  sideloadAssociations: function(store, type, json, prop, loaded) {
+    loaded[prop] = true;
+
+    get(type, 'associationsByName').forEach(function(key, meta) {
+      key = meta.key || key;
+      if (meta.kind === 'belongsTo') {
+        key = this.pluralize(key);
+      }
+      if (json[key] && !loaded[key]) {
+        this.sideloadAssociations(store, meta.type, json, key, loaded);
+      }
+    }, this);
+
+    this.loadValue(store, type, json[prop]);
   },
 
   loadValue: function(store, type, value) {
@@ -226,9 +288,9 @@ DS.RESTAdapter = DS.Adapter.extend({
   buildURL: function(record, suffix) {
     var url = [""];
 
-    ember_assert("Namespace URL (" + this.namespace + ") must not start with slash", !this.namespace || this.namespace.toString().charAt(0) !== "/");
-    ember_assert("Record URL (" + record + ") must not start with slash", !record || record.toString().charAt(0) !== "/");
-    ember_assert("URL suffix (" + suffix + ") must not start with slash", !suffix || suffix.toString().charAt(0) !== "/");
+    Ember.assert("Namespace URL (" + this.namespace + ") must not start with slash", !this.namespace || this.namespace.toString().charAt(0) !== "/");
+    Ember.assert("Record URL (" + record + ") must not start with slash", !record || record.toString().charAt(0) !== "/");
+    Ember.assert("URL suffix (" + suffix + ") must not start with slash", !suffix || suffix.toString().charAt(0) !== "/");
 
     if (this.namespace !== undefined) {
       url.push(this.namespace);

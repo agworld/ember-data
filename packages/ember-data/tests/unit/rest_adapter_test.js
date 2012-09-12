@@ -66,7 +66,10 @@ module("the REST adapter", {
     adapter.destroy();
     store.destroy();
 
-    if (person) { person.destroy(); }
+    if (person) {
+      person.destroy();
+      person = null;
+    }
   }
 });
 
@@ -98,8 +101,6 @@ var expectStates = function(state, value) {
 };
 
 test("creating a person makes a POST to /people, with the data hash", function() {
-  set(adapter, 'bulkCommit', false);
-
   person = store.createRecord(Person, { name: "Tom Dale" });
 
   expectState('new');
@@ -117,8 +118,6 @@ test("creating a person makes a POST to /people, with the data hash", function()
 });
 
 test("singular creations can sideload data", function() {
-  set(adapter, 'bulkCommit', false);
-
   adapter.mappings = {
     groups: Group
   };
@@ -147,8 +146,6 @@ test("singular creations can sideload data", function() {
 });
 
 test("updating a person makes a PUT to /people/:id with the data hash", function() {
-  set(adapter, 'bulkCommit', false);
-
   store.load(Person, { id: 1, name: "Yehuda Katz" });
 
   person = store.find(Person, 1);
@@ -174,8 +171,6 @@ test("updating a person makes a PUT to /people/:id with the data hash", function
 });
 
 test("updates are not required to return data", function() {
-  set(adapter, 'bulkCommit', false);
-
   store.load(Person, { id: 1, name: "Yehuda Katz" });
 
   person = store.find(Person, 1);
@@ -201,8 +196,6 @@ test("updates are not required to return data", function() {
 });
 
 test("singular updates can sideload data", function() {
-  set(adapter, 'bulkCommit', false);
-
   adapter.mappings = {
     groups: Group
   };
@@ -238,7 +231,6 @@ test("singular updates can sideload data", function() {
 });
 
 test("updating a record with custom primaryKey", function() {
-  set(adapter, 'bulkCommit', false);
   store.load(Role, { _id: 1, name: "Developer" });
 
   role = store.find(Role, 1);
@@ -252,8 +244,6 @@ test("updating a record with custom primaryKey", function() {
 
 
 test("deleting a person makes a DELETE to /people/:id", function() {
-  set(adapter, 'bulkCommit', false);
-
   store.load(Person, { id: 1, name: "Tom Dale" });
 
   person = store.find(Person, 1);
@@ -277,8 +267,6 @@ test("deleting a person makes a DELETE to /people/:id", function() {
 });
 
 test("singular deletes can sideload data", function() {
-  set(adapter, 'bulkCommit', false);
-
   adapter.mappings = {
     groups: Group
   };
@@ -312,8 +300,6 @@ test("singular deletes can sideload data", function() {
 });
 
 test("deleting a record with custom primaryKey", function() {
-  set(adapter, 'bulkCommit', false);
-
   store.load(Role, { _id: 1, name: "Developer" });
 
   role = store.find(Role, 1);
@@ -435,6 +421,35 @@ test("finding many people by a list of IDs", function() {
   people.forEach(function(person) {
     equal(get(person, 'isLoaded'), true, "the person is being loaded");
   });
+});
+
+test("finding many people by a list of IDs doesn't rely on the returned array order matching the passed list of ids", function() {
+  store.load(Group, { id: 1, people: [ 1, 2, 3 ] });
+
+  var group = store.find(Group, 1);
+
+  var people = get(group, 'people');
+
+  ajaxHash.success({
+    people: [
+      { id: 2, name: "Tom Dale" },
+      { id: 1, name: "Rein Heinrichs" },
+      { id: 3, name: "Yehuda Katz" }
+    ]
+  });
+
+  var rein = people.objectAt(0);
+  equal(get(rein, 'name'), "Rein Heinrichs");
+  equal(get(rein, 'id'), 1);
+
+  var tom = people.objectAt(1);
+  equal(get(tom, 'name'), "Tom Dale");
+  equal(get(tom, 'id'), 2);
+
+  var yehuda = people.objectAt(2);
+  equal(get(yehuda, 'name'), "Yehuda Katz");
+  equal(get(yehuda, 'id'), 3);
+
 });
 
 test("additional data can be sideloaded in a GET with many IDs", function() {
@@ -563,6 +578,8 @@ test("finding people by a query can sideload data", function() {
 });
 
 test("creating several people (with bulkCommit) makes a POST to /people, with a data hash Array", function() {
+  set(adapter, 'bulkCommit', true);
+
   var tom = store.createRecord(Person, { name: "Tom Dale" });
   var yehuda = store.createRecord(Person, { name: "Yehuda Katz" });
 
@@ -584,6 +601,8 @@ test("creating several people (with bulkCommit) makes a POST to /people, with a 
 });
 
 test("bulk commits can sideload data", function() {
+  set(adapter, 'bulkCommit', true);
+
   var tom = store.createRecord(Person, { name: "Tom Dale" });
   var yehuda = store.createRecord(Person, { name: "Yehuda Katz" });
 
@@ -614,6 +633,8 @@ test("bulk commits can sideload data", function() {
 });
 
 test("updating several people (with bulkCommit) makes a PUT to /people/bulk with the data hash Array", function() {
+  set(adapter, 'bulkCommit', true);
+
   store.loadMany(Person, [
     { id: 1, name: "Yehuda Katz" },
     { id: 2, name: "Carl Lerche" }
@@ -650,6 +671,8 @@ test("updating several people (with bulkCommit) makes a PUT to /people/bulk with
 });
 
 test("bulk updates can sideload data", function() {
+  set(adapter, 'bulkCommit', true);
+
   adapter.mappings = {
     groups: Group
   };
@@ -696,6 +719,8 @@ test("bulk updates can sideload data", function() {
 });
 
 test("deleting several people (with bulkCommit) makes a PUT to /people/bulk", function() {
+  set(adapter, 'bulkCommit', true);
+
   store.loadMany(Person, [
     { id: 1, name: "Yehuda Katz" },
     { id: 2, name: "Carl Lerche" }
@@ -729,6 +754,8 @@ test("deleting several people (with bulkCommit) makes a PUT to /people/bulk", fu
 });
 
 test("bulk deletes can sideload data", function() {
+  set(adapter, 'bulkCommit', true);
+
   adapter.mappings = {
     groups: Group
   };
@@ -778,3 +805,44 @@ test("if you specify a namespace then it is prepended onto all URLs", function()
   store.load(Person, { id: 1 });
 });
 
+test("sideloaded data is loaded prior to primary data (to ensure relationship coherence)", function() {
+  expect(1);
+
+  group = store.find(Group, 1);
+  group.on("didLoad", function() {
+    equal(group.get('people.firstObject').get('name'), "Tom Dale", "sideloaded data are already loaded");
+  });
+
+  ajaxHash.success({
+    people: [
+      { id: 1, name: "Tom Dale" }
+    ],
+    group: { id: 1, name: "Tilde team", people: [1] }
+  });
+});
+
+test("additional data can be sideloaded with associations in correct order", function() {
+  var Comment = DS.Model.extend({
+    person: DS.belongsTo(Person)
+  });
+
+  store.adapter.mappings = {'comments': Comment};
+
+  var comments = store.filter(Comment, function(data) {
+    equal(store.find(Comment, data.get('id')).get('person.id'), 1);
+  });
+
+  group = store.find(Group, 1);
+
+  ajaxHash.success({
+    group: {
+      id: 1, name: "Group 1", people: [ 1 ]
+    },
+    comments: [{
+      id: 1, person_id: 1, text: 'hello'
+    }],
+    people: [{
+      id: 1, name: "Yehuda Katz"
+    }]
+  });
+});

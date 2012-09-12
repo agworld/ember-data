@@ -7,7 +7,7 @@ gem "uglifier", "~> 1.0.3"
 
 group :development do
   gem "rack"
-  gem "github-upload"
+  gem "github_downloads"
   gem "ember-docs", :git => "https://github.com/emberjs/docs-generator.git"
   gem "kicker"
 end

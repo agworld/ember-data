@@ -3,11 +3,26 @@ abort "Please use Ruby 1.9 to build Ember.js!" if RUBY_VERSION !~ /^1\.9/
 require "bundler/setup"
 require "erb"
 require 'rake-pipeline'
-require "ember_docs/cli"
 require "colored"
 
 def pipeline
   Rake::Pipeline::Project.new("Assetfile")
+end
+
+def setup_uploader
+  require 'github_downloads'
+  uploader = GithubDownloads::Uploader.new
+  uploader.authorize
+  uploader
+end
+
+def upload_file(uploader, filename, description, file)
+  print "Uploading #{filename}..."
+  if uploader.upload_file(filename, description, file)
+    puts "Success"
+  else
+    puts "Failure"
+  end
 end
 
 desc "Strip trailing whitespace for JavaScript files in packages"
@@ -34,6 +49,15 @@ task :clean do
   puts "Done"
 end
 
+desc "Upload latest Ember Data build to GitHub repository"
+task :upload_latest => :dist do
+  uploader = setup_uploader
+
+  # Upload minified first, so non-minified shows up on top
+  upload_file(uploader, 'ember-data-latest.min.js', "Ember Data Master (minified)", "dist/ember-data.min.js")
+  upload_file(uploader, 'ember-data-latest.js', "Ember Data Master", "dist/ember-data.js")
+end
+
 desc "Run tests with phantomjs"
 task :test, [:suite] => :dist do |t, args|
   unless system("which phantomjs > /dev/null 2>&1")
@@ -43,9 +67,9 @@ task :test, [:suite] => :dist do |t, args|
   suites = {
     :default => ["package=all"],
     :all => ["package=all",
-              "package=all&jquery=1.6.4&nojshint=true",
+              "package=all&jquery=1.7.2&nojshint=true",
               "package=all&extendprototypes=true&nojshint=true",
-              "package=all&extendprototypes=true&jquery=1.6.4&nojshint=true",
+              "package=all&extendprototypes=true&jquery=1.7.2&nojshint=true",
               "package=all&dist=build&nojshint=true"]
   }
 

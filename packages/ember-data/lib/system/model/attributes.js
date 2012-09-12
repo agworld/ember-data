@@ -1,4 +1,4 @@
-var get = Ember.get, getPath = Ember.getPath;
+var get = Ember.get;
 
 require("ember-data/system/model/model");
 
@@ -26,9 +26,20 @@ DS.Model.reopenClass({
   }
 });
 
+function getAttr(record, options, key) {
+  var data = get(record, 'data');
+  var value = get(data, key);
+
+  if (value === undefined) {
+    value = options.defaultValue;
+  }
+
+  return value;
+}
+
 DS.attr = function(type, options) {
   var transform = DS.attr.transforms[type];
-  ember_assert("Could not find model attribute of type " + type, !!transform);
+  Ember.assert("Could not find model attribute of type " + type, !!transform);
 
   var transformFrom = transform.from;
   var transformTo = transform.to;
@@ -55,14 +66,12 @@ DS.attr = function(type, options) {
 
     if (arguments.length === 2) {
       value = transformTo(value);
-      this.setProperty(key, value);
-    } else {
-      data = get(this, 'data');
-      value = get(data, key);
 
-      if (value === undefined) {
-        value = options.defaultValue;
+      if (value !== getAttr(this, options, key)) {
+        this.setProperty(key, value);
       }
+    } else {
+      value = getAttr(this, options, key);
     }
 
     return transformFrom(value);

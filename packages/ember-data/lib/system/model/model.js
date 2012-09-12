@@ -1,10 +1,10 @@
 require("ember-data/system/model/states");
 require("ember-data/system/model/data_proxy");
 
-var get = Ember.get, set = Ember.set, getPath = Ember.getPath, none = Ember.none;
+var get = Ember.get, set = Ember.set, none = Ember.none;
 
 var retrieveFromCurrentState = Ember.computed(function(key) {
-  return get(getPath(this, 'stateManager.currentState'), key);
+  return get(get(this, 'stateManager.currentState'), key);
 }).property('stateManager.currentState').cacheable();
 
 DS.Model = Ember.Object.extend(Ember.Evented, {
@@ -35,7 +35,8 @@ DS.Model = Ember.Object.extend(Ember.Evented, {
       return value;
     }
 
-    return data && get(data, primaryKey);
+    var id = get(data, primaryKey);
+    return id ? id : this._id;
   }).property('primaryKey', 'data'),
 
   // The following methods are callbacks invoked by `toJSON`. You
@@ -196,6 +197,9 @@ DS.Model = Ember.Object.extend(Ember.Evented, {
   didLoad: Ember.K,
   didUpdate: Ember.K,
   didCreate: Ember.K,
+  didDelete: Ember.K,
+  becameInvalid: Ember.K,
+  becameError: Ember.K,
 
   init: function() {
     var stateManager = DS.StateManager.create({
@@ -247,7 +251,7 @@ DS.Model = Ember.Object.extend(Ember.Evented, {
     var data = get(this, 'data');
 
     if (data && key in data) {
-      ember_assert("You attempted to access the " + key + " property on a record without defining an attribute.", false);
+      Ember.assert("You attempted to access the " + key + " property on a record without defining an attribute.", false);
     }
   },
 
@@ -255,7 +259,7 @@ DS.Model = Ember.Object.extend(Ember.Evented, {
     var data = get(this, 'data');
 
     if (data && key in data) {
-      ember_assert("You attempted to set the " + key + " property on a record without defining an attribute.", false);
+      Ember.assert("You attempted to set the " + key + " property on a record without defining an attribute.", false);
     } else {
       return this._super(key, value);
     }
@@ -291,11 +295,18 @@ DS.Model = Ember.Object.extend(Ember.Evented, {
         cachedValue = this.cacheFor(name);
 
         if (cachedValue) {
-          var ids = data.get(name) || [];
-          var clientIds = Ember.ArrayUtils.map(ids, function(id) {
-            return store.clientIdForId(association.type, id);
-          });
-
+          var key = association.options.key || get(this, 'namingConvention').keyToJSONKey(name),
+              ids = data.get(key) || [];
+          
+          var clientIds;   
+          if(association.options.embedded) {
+            clientIds = store.loadMany(association.type, ids).clientIds;
+          } else {
+            clientIds = Ember.EnumerableUtils.map(ids, function(id) {
+              return store.clientIdForId(association.type, id);
+            });
+          }
+          
           set(cachedValue, 'content', Ember.A(clientIds));
           cachedValue.fetch();
         }
@@ -309,8 +320,8 @@ DS.Model = Ember.Object.extend(Ember.Evented, {
     Override the default event firing from Ember.Evented to
     also call methods with the given name.
   */
-  fire: function(name) {
-    this[name].apply(this, [].slice.call(arguments, 1));
+  trigger: function(name) {
+    Ember.tryInvoke(this, name, [].slice.call(arguments, 1));
     this._super.apply(this, arguments);
   }
 });
@@ -330,6 +341,7 @@ var storeAlias = function(methodName) {
 };
 
 DS.Model.reopenClass({
+  isLoaded: storeAlias('recordIsLoaded'),
   find: storeAlias('find'),
   filter: storeAlias('filter'),
 

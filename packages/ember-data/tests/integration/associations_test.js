@@ -1,4 +1,4 @@
-var get = Ember.get, set = Ember.set, getPath = Ember.getPath;
+var get = Ember.get, set = Ember.set;
 
 var store, adapter;
 var Comment;
@@ -21,7 +21,9 @@ module("Association/adapter integration test", {
   },
 
   teardown: function() {
-    store.destroy();
+    Ember.run(function() {
+      store.destroy();
+    });
   }
 });
 
@@ -45,9 +47,7 @@ test("when adding a record to an association that belongs to another record that
     }
   };
 
-  Ember.run(function() {
-    transaction.commit();
-  });
+  transaction.commit();
 });
 
 test("if a record is added to the store while a child is pending, auto-committing the child record should not commit the new record", function() {
@@ -74,9 +74,7 @@ test("if a record is added to the store while a child is pending, auto-committin
     }
   };
 
-  Ember.run(function() {
-    store.commit();
-  });
+  store.commit();
 });
 
 test("if a parent record and an uncommitted pending child belong to different transactions, committing the parent's transaction does not cause the child's transaction to commit", function() {
@@ -102,8 +100,43 @@ test("if a parent record and an uncommitted pending child belong to different tr
     }
   };
 
-  Ember.run(function() {
-    parentTransaction.commit();
-  });
+  parentTransaction.commit();
 });
 
+var async = function(callback, timeout) {
+  stop();
+
+  timeout = setTimeout(function() {
+    start();
+    ok(false, "Timeout was reached");
+  }, timeout || 100);
+
+  return function() {
+    clearTimeout(timeout);
+
+    start();
+    callback();
+  };
+};
+
+test("an association has an isLoaded flag that indicates whether the ManyArray has finished loaded", function() {
+  expect(7);
+
+  var array;
+
+  adapter.find = function(store, type, id) {
+    setTimeout(async(function() {
+      equal(array.get('isLoaded'), false, "Before loading, the array isn't isLoaded");
+      store.load(type, { id: id });
+
+      if (id === 3) {
+        equal(array.get('isLoaded'), true, "After loading all records, the array isLoaded");
+      } else {
+        equal(array.get('isLoaded'), false, "After loading some records, the array isn't isLoaded");
+      }
+    }), 1);
+  };
+
+  array = store.findMany(Comment, [ 1, 2, 3 ]);
+  equal(get(array, 'isLoaded'), false, "isLoaded should not be true when first created");
+});

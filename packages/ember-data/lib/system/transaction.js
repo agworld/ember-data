@@ -1,4 +1,5 @@
-var get = Ember.get, set = Ember.set, getPath = Ember.getPath, fmt = Ember.String.fmt;
+var get = Ember.get, set = Ember.set, fmt = Ember.String.fmt,
+    removeObject = Ember.EnumerableUtils.removeObject;
 
 /**
   A transaction allows you to collect multiple records into a unit of work
@@ -17,7 +18,7 @@ var get = Ember.get, set = Ember.set, getPath = Ember.getPath, fmt = Ember.Strin
   If you do not explicitly create a transaction, a record is assigned to
   an implicit transaction called the default transaction. In these cases,
   you can treat your application's instance of `DS.Store` as a transaction
-  and call the `commit()` and `rollback()` methods on the store itself. 
+  and call the `commit()` and `rollback()` methods on the store itself.
 
   Once a record has been successfully committed or rolled back, it will
   be moved back to the implicit transaction. Because it will now be in
@@ -87,11 +88,18 @@ DS.Transaction = Ember.Object.extend({
   */
   init: function() {
     set(this, 'buckets', {
-      clean:   Ember.Map.create(),
-      created: Ember.Map.create(),
-      updated: Ember.Map.create(),
-      deleted: Ember.Map.create()
+      clean:    Ember.Map.create(),
+      created:  Ember.Map.create(),
+      updated:  Ember.Map.create(),
+      deleted:  Ember.Map.create(),
+      inflight: Ember.Map.create()
     });
+
+    this.dirtyRelationships = {
+      byChild: Ember.Map.create(),
+      byNewParent: Ember.Map.create(),
+      byOldParent: Ember.Map.create()
+    };
   },
 
   /**
@@ -119,12 +127,12 @@ DS.Transaction = Ember.Object.extend({
   */
   add: function(record) {
     // we could probably make this work if someone has a valid use case. Do you?
-    ember_assert("Once a record has changed, you cannot move it into a different transaction", !get(record, 'isDirty'));
+    Ember.assert("Once a record has changed, you cannot move it into a different transaction", !get(record, 'isDirty'));
 
     var recordTransaction = get(record, 'transaction'),
-        defaultTransaction = getPath(this, 'store.defaultTransaction');
+        defaultTransaction = get(this, 'store.defaultTransaction');
 
-    ember_assert("Models cannot belong to more than one transaction at a time.", recordTransaction === defaultTransaction);
+    Ember.assert("Models cannot belong to more than one transaction at a time.", recordTransaction === defaultTransaction);
 
     this.adoptRecord(record);
   },
@@ -206,7 +214,7 @@ DS.Transaction = Ember.Object.extend({
     // and initiate a rollback on them. As a side effect of telling
     // the record to roll back, it should also move itself out of
     // the dirty bucket and into the clean bucket.
-    ['created', 'updated', 'deleted'].forEach(function(bucketType) {
+    ['created', 'updated', 'deleted', 'inflight'].forEach(function(bucketType) {
       dirty = this.bucketForType(bucketType);
 
       dirty.forEach(function(type, records) {
@@ -234,7 +242,7 @@ DS.Transaction = Ember.Object.extend({
     @param {DS.Model} record
   */
   remove: function(record) {
-    var defaultTransaction = getPath(this, 'store.defaultTransaction');
+    var defaultTransaction = get(this, 'store.defaultTransaction');
     defaultTransaction.adoptRecord(record);
   },
 
@@ -334,6 +342,113 @@ DS.Transaction = Ember.Object.extend({
   /**
     @private
 
+    Called by a ManyArray when a new record is added to it. This
+    method will index a relationship description by the child
+    record, its old parent, and its new parent.
+
+    The store will provide this description to the adapter's
+    shouldCommit method, so it can determine whether any of
+    the records is pending another record. The store will also
+    provide a list of these descriptions to the adapter's commit
+    method.
+
+    @param {DS.Model} record the new child record
+    @param {DS.Model} oldParent the parent that the child is
+      moving from, or null
+    @param {DS.Model} newParent the parent that the child is
+      moving to, or null
+  */
+  relationshipBecameDirty: function(child, oldParent, newParent) {
+    var relationships = this.dirtyRelationships, relationship;
+
+    var relationshipsForChild = relationships.byChild.get(child),
+        possibleRelationship,
+        needsNewEntries = true;
+
+    // If the child has any existing dirty relationships in this
+    // transaction, we need to collapse the old relationship
+    // into the new one. For example, if we change the parent of
+    // a child record before saving, there is no need to save the
+    // record that was its parent temporarily.
+    if (relationshipsForChild) {
+
+      // Loop through all of the relationships we know about that
+      // contain the same child as the new relationship.
+      for (var i=0, l=relationshipsForChild.length; i<l; i++) {
+        relationship = relationshipsForChild[i];
+
+        // If the parent of the child record has changed, there is
+        // no need to update the old parent that had not yet been saved.
+        //
+        // This case is two changes in a record's parent:
+        //
+        //   A -> B
+        //   B -> C
+        //
+        // In this case, there is no need to remember the A->B
+        // change. We can collapse both changes into:
+        //
+        //   A -> C
+        //
+        // Another possible case is:
+        //
+        //   A -> B
+        //   B -> A
+        //
+        // In this case, we don't need to do anything. We can
+        // simply remove the original A->B change and call it
+        // a day.
+        if (relationship.newParent === oldParent) {
+          oldParent = relationship.oldParent;
+          this.removeRelationship(relationship);
+
+          // This is the case of A->B followed by B->A.
+          if (relationship.oldParent === newParent) {
+            needsNewEntries = false;
+          }
+        }
+      }
+    }
+
+    relationship = {
+      child: child,
+      oldParent: oldParent,
+      newParent: newParent
+    };
+
+    // If we didn't go A->B and then B->A, add new dirty relationship
+    // entries.
+    if (needsNewEntries) {
+      this.addRelationshipTo('byChild', child, relationship);
+      this.addRelationshipTo('byOldParent', oldParent, relationship);
+      this.addRelationshipTo('byNewParent', newParent, relationship);
+    }
+  },
+
+  removeRelationship: function(relationship) {
+    var relationships = this.dirtyRelationships;
+
+    removeObject(relationships.byOldParent.get(relationship.oldParent), relationship);
+    removeObject(relationships.byNewParent.get(relationship.newParent), relationship);
+    removeObject(relationships.byChild.get(relationship.child), relationship);
+  },
+
+  addRelationshipTo: function(type, record, description) {
+    var map = this.dirtyRelationships[type];
+
+    var relationships = map.get(record);
+
+    if (!relationships) {
+      relationships = [ description ];
+      map.set(record, relationships);
+    } else {
+      relationships.push(description);
+    }
+  },
+
+  /**
+    @private
+
     Called by a record's state manager to indicate that the record has entered
     a dirty state. The record will be moved from the `clean` bucket and into
     the appropriate dirty bucket.
@@ -349,7 +464,21 @@ DS.Transaction = Ember.Object.extend({
     @private
 
     Called by a record's state manager to indicate that the record has entered
-    a clean state. The record will be moved from its current dirty bucket and into
+    inflight state. The record will be moved from its current dirty bucket and into
+    the `inflight` bucket.
+
+    @param {String} bucketType one of `created`, `updated`, or `deleted`
+  */
+  recordBecameInFlight: function(kind, record) {
+    this.removeFromBucket(kind, record);
+    this.addToBucket('inflight', record);
+  },
+
+  /**
+    @private
+
+    Called by a record's state manager to indicate that the record has entered
+    a clean state. The record will be moved from its current dirty or inflight bucket and into
     the `clean` bucket.
 
     @param {String} bucketType one of `created`, `updated`, or `deleted`
@@ -357,7 +486,6 @@ DS.Transaction = Ember.Object.extend({
   recordBecameClean: function(kind, record) {
     this.removeFromBucket(kind, record);
 
-    var defaultTransaction = getPath(this, 'store.defaultTransaction');
-    defaultTransaction.adoptRecord(record);
+    this.remove(record);
   }
 });

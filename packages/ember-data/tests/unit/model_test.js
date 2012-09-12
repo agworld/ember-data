@@ -1,4 +1,4 @@
-var get = Ember.get, set = Ember.set, getPath = Ember.getPath;
+var get = Ember.get, set = Ember.set;
 
 var Person, store, array;
 
@@ -7,7 +7,8 @@ module("DS.Model", {
     store = DS.Store.create();
 
     Person = DS.Model.extend({
-      name: DS.attr('string')
+      name: DS.attr('string'),
+      isDrugAddict: DS.attr('boolean')
     });
   },
 
@@ -22,6 +23,16 @@ test("can have a property set on it", function() {
   set(record, 'name', 'bar');
 
   equal(get(record, 'name'), 'bar', "property was set on the record");
+});
+
+test("setting a property on a record that has not changed does not cause it to become dirty", function() {
+  store.load(Person, { id: 1, name: "Peter", is_drug_addict: true });
+  var person = store.find(Person, 1);
+
+  equal(person.get('isDirty'), false, "precond - person record should not be dirty");
+  person.set('name', "Peter");
+  person.set('isDrugAddict', true);
+  equal(person.get('isDirty'), false, "record does not become dirty after setting property to old value");
 });
 
 test("a record reports its unique id via the `id` property", function() {
@@ -265,16 +276,12 @@ test("when a DS.Model updates its attributes, its changes affect its filtered Ar
 
   equal(get(person, 'name'), "Scumbag Katz", "precond - the item is correct");
 
-  Ember.run(function() {
-    set(person, 'name', "Yehuda Katz");
-  });
+  set(person, 'name', "Yehuda Katz");
 
   equal(get(people, 'length'), 1, "there is still one item");
   equal(get(person, 'name'), "Yehuda Katz", "it has the updated item");
 
-  Ember.run(function() {
-    set(person, 'name', "Yehuda Katz-Foo");
-  });
+  set(person, 'name', "Yehuda Katz-Foo");
 
   equal(get(people, 'length'), 0, "there are now no items");
 });
@@ -307,16 +314,12 @@ test("when a DS.Model updates its attributes, its changes affect its filtered Ar
 
   equal(get(person, 'name'), "Scumbag Katz", "precond - the item is correct");
 
-  Ember.run(function() {
-    set(person, 'name', "Yehuda Katz");
-  });
+  set(person, 'name', "Yehuda Katz");
 
   equal(get(people, 'length'), 1, "there is still one item");
   equal(get(person, 'name'), "Yehuda Katz", "it has the updated item");
 
-  Ember.run(function() {
-    set(person, 'name', "Yehuda Katz-Foo");
-  });
+  set(person, 'name', "Yehuda Katz-Foo");
 
   equal(get(people, 'length'), 0, "there are now no items");
 });
@@ -342,13 +345,43 @@ test("when a new record depends on the state of another record, it enters the pe
 
   equal(get(childComment, 'isPending'), true, "Child comment is pending on the parent comment");
 
-  Ember.run(function() {
-    store.commit();
-  });
+  store.commit();
 
   equal(get(parentComment, 'isLoaded'), true, "precond - Parent comment is loaded");
   equal(get(parentComment, 'isDirty'), false, "precond - Parent comment is not dirty");
   equal(get(childComment, 'isPending'), false, "Child comment is no longer pending on the parent comment");
+});
+
+test("when a new record depends on the state of another record which depends on the state of another record, it enters the pending state", function() {
+  var id = 0;
+
+  var store = DS.Store.create({
+    adapter: DS.Adapter.create({
+      createRecord: function(store, type, record) {
+        var hash = record.toJSON();
+        hash.id = ++id;
+        store.didCreateRecord(record, hash);
+      }
+    })
+  });
+  var Comment = DS.Model.extend();
+
+  var parentComment = store.createRecord(Comment);
+  var childComment = store.createRecord(Comment);
+  var grandchildComment = store.createRecord(Comment);
+
+  childComment.waitingOn(parentComment);
+  grandchildComment.waitingOn(childComment);
+
+  equal(get(childComment, 'isPending'), true, "Child comment is pending on the parent comment");
+  equal(get(grandchildComment, 'isPending'), true, "Grandchild comment is pending on the child comment");
+
+  store.commit();
+
+  equal(get(parentComment, 'isLoaded'), true, "precond - Parent comment is loaded");
+  equal(get(parentComment, 'isDirty'), false, "precond - Parent comment is not dirty");
+  equal(get(childComment, 'isPending'), false, "Child comment is no longer pending on the parent comment");
+  equal(get(grandchildComment, 'isPending'), false, "Second level comment is on its parent comment");
 });
 
 test("when an updated record depends on the state of another record, it enters the pending state", function() {
@@ -377,9 +410,7 @@ test("when an updated record depends on the state of another record, it enters t
 
   var childComment = store.createRecord(Comment);
 
-  Ember.run(function() {
-    store.commit();
-  });
+  store.commit();
 
   parentComment = store.createRecord(Comment);
 
@@ -393,9 +424,7 @@ test("when an updated record depends on the state of another record, it enters t
 
   equal(get(childComment, 'isPending'), true, "Child comment is pending on the parent comment");
 
-  Ember.run(function() {
-    store.commit();
-  });
+  store.commit();
 
   equal(get(parentComment, 'isLoaded'), true, "precond - Parent comment is loaded");
   equal(get(parentComment, 'isDirty'), false, "precond - Parent comment is not dirty");
@@ -426,9 +455,7 @@ test("when a loaded record depends on the state of another record, it enters the
 
   childComment = store.createRecord(Comment);
 
-  Ember.run(function() {
-    store.commit();
-  });
+  store.commit();
 
   equal(childComment.get('isDirty'), false, "precond - record is not marked as dirty");
   equal(childComment.get('isNew'), false, "precond - record is not new");
@@ -439,9 +466,7 @@ test("when a loaded record depends on the state of another record, it enters the
   equal(get(childComment, 'isDirty'), true, "child comment is marked as dirty once a dependency has been created");
   equal(get(childComment, 'isPending'), true, "Child comment is pending on the parent comment");
 
-  Ember.run(function() {
-    store.commit();
-  });
+  store.commit();
 
   equal(get(parentComment, 'isLoaded'), true, "precond - Parent comment is loaded");
   equal(get(parentComment, 'isDirty'), false, "precond - Parent comment is not dirty");
@@ -480,10 +505,54 @@ test("when a record depends on another record, we can delete the first record an
   equal(get(childComment, 'isDirty'), false, "child record should not be dirty since it was deleted and never saved");
   equal(get(parentComment, 'isDirty'), true, "parent comment has not yet been saved");
 
-  Ember.run(function() {
-    store.commit();
-  });
+  store.commit();
 
   equal(get(parentComment, 'isDirty'), false, "parent comment has been saved");
   ok(true, "no exception was thrown");
 });
+
+test("can ask if record with a given id is loaded", function() {
+  equal(store.recordIsLoaded(Person, 1), true, 'should have person with id 1');
+  equal(store.recordIsLoaded(Person, 4), false, 'should not have person with id 2');
+});
+
+test("a listener can be added to a record", function() {
+  var count = 0;
+  var F = function() { count++; };
+  var record = store.createRecord(Person);
+
+  record.on('event!', F);
+  record.trigger('event!');
+
+  equal(count, 1, "the event was triggered");
+
+  record.trigger('event!');
+
+  equal(count, 2, "the event was triggered");
+});
+
+test("when an event is triggered on a record the method with the same name is invoked with arguments", function(){
+  var count = 0;
+  var F = function() { count++; };
+  var record = store.createRecord(Person);
+
+  record.eventNamedMethod = F;
+
+  record.trigger('eventNamedMethod');
+
+  equal(count, 1, "the corresponding method was called");
+});
+
+test("when a method is invoked from an event with the same name the arguments are passed through", function(){
+  var eventMethodArgs = null;
+  var F = function() { eventMethodArgs = arguments; };
+  var record = store.createRecord(Person);
+
+  record.eventThatTriggersMethod = F;
+
+  record.trigger('eventThatTriggersMethod', 1, 2);
+
+  equal( eventMethodArgs[0], 1);
+  equal( eventMethodArgs[1], 2);
+});
+

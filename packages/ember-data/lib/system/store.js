@@ -1,9 +1,9 @@
 /*globals Ember*/
 
-require("ember-data/system/record_array");
+require("ember-data/system/record_arrays");
 require("ember-data/system/transaction");
 
-var get = Ember.get, set = Ember.set, getPath = Ember.getPath, fmt = Ember.String.fmt;
+var get = Ember.get, set = Ember.set, fmt = Ember.String.fmt;
 
 var DATA_PROXY = {
   get: function(name) {
@@ -81,6 +81,13 @@ DS.Store = Ember.Object.extend({
     this.clientIdToId = {};
     this.recordArraysByClientId = {};
 
+    // Internally, we maintain a map of all unloaded IDs requested by
+    // a ManyArray. As the adapter loads hashes into the store, the
+    // store notifies any interested ManyArrays. When the ManyArray's
+    // total number of loading records drops to zero, it becomes
+    // `isLoaded` and fires a `didLoad` event.
+    this.loadingRecordArrays = {};
+
     set(this, 'defaultTransaction', this.transaction());
 
     return this._super();
@@ -129,7 +136,7 @@ DS.Store = Ember.Object.extend({
   _adapter: Ember.computed(function() {
     var adapter = get(this, 'adapter');
     if (typeof adapter === 'string') {
-      return getPath(this, adapter, false) || getPath(window, adapter);
+      return get(this, adapter, false) || get(window, adapter);
     }
     return adapter;
   }).property('adapter').cacheable(),
@@ -305,8 +312,7 @@ DS.Store = Ember.Object.extend({
 
   findByClientId: function(type, clientId, id) {
     var recordCache = get(this, 'recordCache'),
-        dataCache = this.typeMapFor(type).cidToHash,
-        record;
+        dataCache, record;
 
     // If there is already a clientId assigned for this
     // type/id combination, try to find an existing
@@ -321,6 +327,8 @@ DS.Store = Ember.Object.extend({
         // 'isLoading' state
         record = this.materializeRecord(type, clientId);
 
+        dataCache = this.typeMapFor(type).cidToHash;
+
         if (typeof dataCache[clientId] === 'object') {
           record.send('didChangeData');
         }
@@ -330,7 +338,7 @@ DS.Store = Ember.Object.extend({
 
       // create a new instance of the model type in the
       // 'isLoading' state
-      record = this.materializeRecord(type, clientId);
+      record = this.materializeRecord(type, clientId, id);
 
       // let the adapter set the data, possibly async
       var adapter = get(this, '_adapter');
@@ -344,78 +352,123 @@ DS.Store = Ember.Object.extend({
   /**
     @private
 
-    Ask the adapter to fetch IDs that are not already loaded.
+    Given a type and array of `clientId`s, determines which of those
+    `clientId`s has not yet been loaded.
 
-    This method will convert `id`s to `clientId`s, filter out
-    `clientId`s that already have a data hash present, and pass
-    the remaining `id`s to the adapter.
-
-    @param {Class} type A model class
-    @param {Array} ids An array of ids
-    @param {Object} query
-
-    @returns {Array} An Array of all clientIds for the
-      specified ids.
+    In preparation for loading, this method also marks any unloaded
+    `clientId`s as loading.
   */
-  fetchMany: function(type, ids, query) {
-    var typeMap = this.typeMapFor(type),
-        idToClientIdMap = typeMap.idToCid,
+  neededClientIds: function(type, clientIds) {
+    var neededClientIds = [],
+        typeMap = this.typeMapFor(type),
         dataCache = typeMap.cidToHash,
-        data = typeMap.cidToHash,
-        needed;
+        clientId;
 
-    var clientIds = Ember.A([]);
-
-    if (ids) {
-      needed = [];
-
-      ids.forEach(function(id) {
-        // Get the clientId for the given id
-        var clientId = idToClientIdMap[id];
-
-        // If there is no `clientId` yet
-        if (clientId === undefined) {
-          // Create a new `clientId`, marking its data hash
-          // as loading. Once the adapter returns the data
-          // hash, it will be updated
-          clientId = this.pushHash(LOADING, id, type);
-          needed.push(id);
-
-        // If there is a clientId, but its data hash is
-        // marked as unloaded (this happens when a
-        // hasMany association creates clientIds for its
-        // referenced ids before they were loaded)
-        } else if (clientId && data[clientId] === UNLOADED) {
-          // change the data hash marker to loading
-          dataCache[clientId] = LOADING;
-          needed.push(id);
-        }
-
-        // this method is expected to return a list of
-        // all of the clientIds for the specified ids,
-        // unconditionally add it.
-        clientIds.push(clientId);
-      }, this);
-    } else {
-      needed = null;
+    for (var i=0, l=clientIds.length; i<l; i++) {
+      clientId = clientIds[i];
+      if (dataCache[clientId] === UNLOADED) {
+        neededClientIds.push(clientId);
+        dataCache[clientId] = LOADING;
+      }
     }
 
-    // If there are any needed ids, ask the adapter to load them
-    if ((needed && get(needed, 'length') > 0) || query) {
-      var adapter = get(this, '_adapter');
-      if (adapter && adapter.findMany) { adapter.findMany(this, type, needed, query); }
-      else { throw fmt("Adapter is either null or does not implement `findMany` method", this); }
-    }
-
-    return clientIds;
+    return neededClientIds;
   },
 
-  /** @private
-  */
-  findMany: function(type, ids, query) {
-    var clientIds = this.fetchMany(type, ids, query);
+  /**
+    @private
 
-    return this.createManyArray(type, clientIds);
+    This method is the entry point that associations use to update
+    themselves when their underlying data changes.
+
+    First, it determines which of its `clientId`s are still unloaded,
+    then converts the needed `clientId`s to IDs and invokes `findMany`
+    on the adapter.
+  */
+  fetchUnloadedClientIds: function(type, clientIds) {
+    var neededClientIds = this.neededClientIds(type, clientIds);
+    this.fetchMany(type, neededClientIds);
+  },
+
+  /**
+    @private
+
+    This method takes a type and list of `clientId`s, converts the
+    `clientId`s into IDs, and then invokes the adapter's `findMany`
+    method.
+
+    It is used both by a brand new association (via the `findMany`
+    method) or when the data underlying an existing association
+    changes (via the `fetchUnloadedClientIds` method).
+  */
+  fetchMany: function(type, clientIds) {
+    var clientIdToId = this.clientIdToId;
+
+    var neededIds = Ember.EnumerableUtils.map(clientIds, function(clientId) {
+      return clientIdToId[clientId];
+    });
+
+    if (!neededIds.length) { return; }
+
+    var adapter = get(this, '_adapter');
+    if (adapter && adapter.findMany) { adapter.findMany(this, type, neededIds); }
+    else { throw fmt("Adapter is either null or does not implement `findMany` method", this); }
+  },
+
+  /**
+    @private
+
+    `findMany` is the entry point that associations use to generate a
+    new `ManyArray` for the list of IDs specified by the server for
+    the association.
+
+    Its responsibilities are:
+
+    * convert the IDs into clientIds
+    * determine which of the clientIds still need to be loaded
+    * create a new ManyArray whose content is *all* of the clientIds
+    * notify the ManyArray of the number of its elements that are
+      already loaded
+    * insert the unloaded clientIds into the `loadingRecordArrays`
+      bookkeeping structure, which will allow the `ManyArray` to know
+      when all of its loading elements are loaded from the server.
+    * ask the adapter to load the unloaded elements, by invoking
+      findMany with the still-unloaded IDs.
+  */
+  findMany: function(type, ids) {
+    // 1. Convert ids to client ids
+    // 2. Determine which of the client ids need to be loaded
+    // 3. Create a new ManyArray whose content is ALL of the clientIds
+    // 4. Decrement the ManyArray's counter by the number of loaded clientIds
+    // 5. Put the ManyArray into our bookkeeping data structure, keyed on
+    //    the needed clientIds
+    // 6. Ask the adapter to load the records for the unloaded clientIds (but
+    //    convert them back to ids)
+
+    var clientIds = this.clientIdsForIds(type, ids);
+
+    var neededClientIds = this.neededClientIds(type, clientIds),
+        manyArray = this.createManyArray(type, Ember.A(clientIds)),
+        loadedCount = clientIds.length - neededClientIds.length,
+        loadingRecordArrays = this.loadingRecordArrays,
+        clientId, i, l;
+
+    manyArray.send('loadedRecords', loadedCount);
+
+    if (neededClientIds.length) {
+      for (i=0, l=neededClientIds.length; i<l; i++) {
+        clientId = neededClientIds[i];
+        if (loadingRecordArrays[clientId]) {
+          loadingRecordArrays[clientId].push(manyArray);
+        } else {
+          this.loadingRecordArrays[clientId] = [ manyArray ];
+        }
+      }
+
+      this.fetchMany(type, neededClientIds);
+    }
+
+    return manyArray;
   },
 
   findQuery: function(type, query) {
@@ -456,6 +509,10 @@ DS.Store = Ember.Object.extend({
     this.registerRecordArray(array, type, filter);
 
     return array;
+  },
+
+  recordIsLoaded: function(type, id) {
+    return !Ember.none(this.typeMapFor(type).idToCid[id]);
   },
 
   // ............
@@ -507,6 +564,8 @@ DS.Store = Ember.Object.extend({
       dataCache[clientId] = hash;
       record.send('didChangeData');
       record.hashWasUpdated();
+    } else {
+      record.send('didSaveData');
     }
 
     record.send('didCommit');
@@ -532,7 +591,7 @@ DS.Store = Ember.Object.extend({
       // of the data supercedes the local changes.
       record.beginPropertyChanges();
       record.send('didChangeData');
-      recordData.adapterDidUpdate(hash);
+      recordData.adapterDidUpdate();
       record.hashWasUpdated();
       record.endPropertyChanges();
 
@@ -571,11 +630,11 @@ DS.Store = Ember.Object.extend({
 
     primaryKey = type.proto().primaryKey;
 
-    // TODO: Make ember_assert more flexible and convert this into an ember_assert
+    // TODO: Make Ember.assert more flexible
     if (hash) {
-      ember_assert("The server must provide a primary key: " + primaryKey, get(hash, primaryKey));
+      Ember.assert("The server must provide a primary key: " + primaryKey, get(hash, primaryKey));
     } else {
-      ember_assert("The server did not return data, and you did not create a primary key (" + primaryKey + ") on the client", get(get(record, 'data'), primaryKey));
+      Ember.assert("The server did not return data, and you did not create a primary key (" + primaryKey + ") on the client", get(get(record, 'data'), primaryKey));
     }
 
     clientId = get(record, 'clientId');
@@ -616,21 +675,28 @@ DS.Store = Ember.Object.extend({
         clientIds = typeMap.clientIds,
         clientId, hash, proxy;
 
-    var recordCache = get(this, 'recordCache'), record;
+    var recordCache = get(this, 'recordCache'),
+        foundRecord,
+        record;
 
     for (var i=0, l=clientIds.length; i<l; i++) {
       clientId = clientIds[i];
+      foundRecord = false;
 
       hash = dataCache[clientId];
       if (typeof hash === 'object') {
         if (record = recordCache[clientId]) {
-          proxy = get(record, 'data');
+          if (!get(record, 'isDeleted')) {
+            proxy = get(record, 'data');
+            foundRecord = true;
+          }
         } else {
           DATA_PROXY.savedData = hash;
           proxy = DATA_PROXY;
+          foundRecord = true;
         }
 
-        this.updateRecordArray(array, filter, type, clientId, proxy);
+        if (foundRecord) { this.updateRecordArray(array, filter, type, clientId, proxy); }
       }
     }
   },
@@ -643,6 +709,18 @@ DS.Store = Ember.Object.extend({
       filter = get(array, 'filterFunction');
       this.updateRecordArray(array, filter, type, clientId, dataProxy);
     }, this);
+
+    // loop through all manyArrays containing an unloaded copy of this
+    // clientId and notify them that the record was loaded.
+    var manyArrays = this.loadingRecordArrays[clientId], manyArray;
+
+    if (manyArrays) {
+      for (var i=0, l=manyArrays.length; i<l; i++) {
+        manyArrays[i].send('loadedRecords', 1);
+      }
+
+      this.loadingRecordArrays[clientId] = null;
+    }
   },
 
   updateRecordArray: function(array, filter, type, clientId, dataProxy) {
@@ -728,6 +806,24 @@ DS.Store = Ember.Object.extend({
     return this.pushHash(UNLOADED, id, type);
   },
 
+  /**
+    @private
+
+    This method works exactly like `clientIdForId`, but does not
+    require looking up the `typeMap` for every `clientId` and
+    invoking a method per `clientId`.
+  */
+  clientIdsForIds: function(type, ids) {
+    var typeMap = this.typeMapFor(type),
+        idToClientIdMap = typeMap.idToCid;
+
+    return Ember.EnumerableUtils.map(ids, function(id) {
+      var clientId = idToClientIdMap[id];
+      if (clientId) { return clientId; }
+      return this.pushHash(UNLOADED, id, type);
+    }, this);
+  },
+
   // ................
   // . LOADING DATA .
   // ................
@@ -748,7 +844,7 @@ DS.Store = Ember.Object.extend({
     if (hash === undefined) {
       hash = id;
       var primaryKey = type.proto().primaryKey;
-      ember_assert("A data hash was loaded for a record of type " + type.toString() + " but no primary key '" + primaryKey + "' was provided.", primaryKey in hash);
+      Ember.assert("A data hash was loaded for a record of type " + type.toString() + " but no primary key '" + primaryKey + "' was provided.", primaryKey in hash);
       id = hash[primaryKey];
     }
 
@@ -782,7 +878,7 @@ DS.Store = Ember.Object.extend({
       ids = [];
       var primaryKey = type.proto().primaryKey;
 
-      ids = Ember.ArrayUtils.map(hashes, function(hash) {
+      ids = Ember.EnumerableUtils.map(hashes, function(hash) {
         return hash[primaryKey];
       });
     }
@@ -833,12 +929,13 @@ DS.Store = Ember.Object.extend({
   // . RECORD MATERIALIZATION .
   // ..........................
 
-  materializeRecord: function(type, clientId) {
+  materializeRecord: function(type, clientId, id) {
     var record;
 
     get(this, 'recordCache')[clientId] = record = type._create({
       store: this,
-      clientId: clientId
+      clientId: clientId,
+      _id: id
     });
 
     get(this, 'defaultTransaction').adoptRecord(record);

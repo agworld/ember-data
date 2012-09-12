@@ -226,23 +226,32 @@ test("modified records are reset when their transaction is rolled back", functio
   store.load(Person, { id: 1, name: "Scumbag Tom" });
   store.load(Person, { id: 2, name: "Scumbag Carl" });
   store.load(Person, { id: 3, name: "Scumbag André" });
+  store.load(Person, { id: 4, name: "Scumbag Paul" });
 
   var updatedPerson = store.find(Person, 1);
   var deletedPerson = store.find(Person, 2);
   var anotherUpdatedPerson = store.find(Person, 3);
+  var invalidPerson = store.find(Person, 4);
 
   var transaction = store.transaction();
   transaction.add(updatedPerson);
   transaction.add(deletedPerson);
   transaction.add(anotherUpdatedPerson);
+  transaction.add(invalidPerson);
 
   var newPerson = transaction.createRecord(Person, {
     name: "Scumbag Yehuda"
   });
+  var anotherInvalidPerson = transaction.createRecord(Person, {});
 
   updatedPerson.set('name', "Scumbag Patrick");
   anotherUpdatedPerson.set('name', "Scumbag Leah");
   deletedPerson.deleteRecord();
+  invalidPerson.set('name', null);
+  invalidPerson.send('willCommit');
+  store.recordWasInvalid(invalidPerson, {name: 'no name!'});
+  anotherInvalidPerson.send('willCommit');
+  store.recordWasInvalid(anotherInvalidPerson, {name: 'no name!'});
 
   equal(updatedPerson.get('isDirty'), true, "precond - Record is marked as dirty when changed");
   equal(updatedPerson.get('name'), "Scumbag Patrick", "precond - Record has been changed to the value we set");
@@ -252,6 +261,11 @@ test("modified records are reset when their transaction is rolled back", functio
   equal(newPerson.get('isNew'), true, "precond - new record is marked as new");
   equal(deletedPerson.get('isDirty'), true, "precond - deleted record is marked as dirty when deleted");
   equal(deletedPerson.get('isDeleted'), true, "precond - deleted record is marked as deleted");
+  equal(invalidPerson.get('isDirty'), true, "precond - invalid record is marked as dirty");
+  equal(invalidPerson.get('isValid'), false, "precond - invalid record is marked as invalid");
+  equal(anotherInvalidPerson.get('isDirty'), true, "precond - invalid record is marked as dirty");
+  equal(anotherInvalidPerson.get('isNew'), true, "precond - invalid record is marked as dirty");
+  equal(anotherInvalidPerson.get('isValid'), false, "precond - invalid record is marked as invalid");
 
   transaction.rollback();
 
@@ -263,10 +277,155 @@ test("modified records are reset when their transaction is rolled back", functio
   equal(newPerson.get('isDeleted'), true, "created records are deleted when their transaction is rolled back");
   equal(deletedPerson.get('isDirty'), false, "deleted record is no longer considered dirty");
   equal(deletedPerson.get('isDeleted'), false, "deleted record is no longer considered deleted");
+  equal(invalidPerson.get('isDirty'), false, "invalid record is no longer considered dirty");
+  equal(invalidPerson.get('name'), "Scumbag Paul", "Record has previously loaded name");
+  equal(invalidPerson.get('isValid'), true, "invalid record is marked as valid");
+  equal(anotherInvalidPerson.get('isValid'), true, "invalid record is marked as valid");
+  equal(anotherInvalidPerson.get('isDeleted'), true, "created records are deleted when their transaction is rolled back");
 
   equal(get(newPerson, 'transaction'), get(store, 'defaultTransaction'), "record should have been moved back to the default transaction");
   equal(get(updatedPerson, 'transaction'), get(store, 'defaultTransaction'), "record should have been moved back to the default transaction");
   equal(get(anotherUpdatedPerson, 'transaction'), get(store, 'defaultTransaction'), "record should have been moved back to the default transaction");
   equal(get(deletedPerson, 'transaction'), get(store, 'defaultTransaction'), "record should have been moved back to the default transaction");
+  equal(get(invalidPerson, 'transaction'), get(store, 'defaultTransaction'), "record should have been moved back to the default transaction");
+});
+
+test("modified records are reset when their transaction is rolled back", function() {
+  var store = DS.Store.create();
+
+  store.load(Person, { id: 1, name: "Scumbag Tom" });
+
+  var person = store.find(Person, 1);
+
+  var transaction = store.transaction();
+  transaction.add(person);
+
+  person.set('name', 'toto');
+
+  store.recordWasInvalid(person, {name: 'error'});
+
+  equal(person.get('isValid'), false, "precond - invalid record is marked as invalid");
+
+  transaction.rollback();
+
+  equal(person.get('isValid'), true, "invalid record is now marked as valid");
+});
+
+var Post = DS.Model.extend({
+  title: DS.attr('string'),
+  body: DS.attr('string')
+});
+
+var Comment = DS.Model.extend({
+  body: DS.attr('string'),
+  post: DS.belongsTo(Post)
+});
+
+Post.reopen({
+  comments: DS.hasMany(Comment)
+});
+
+var store, adapter;
+module("DS.Transaction - relationships", {
+  setup: function() {
+    adapter = DS.Adapter.create();
+    store = DS.Store.create({
+      adapter: adapter
+    });
+  },
+
+  teardown: function() {
+    adapter.destroy();
+    store.destroy();
+  }
+});
+
+test("If both the parent and child are clean and in the same transaction, a dirty relationship is added to the transaction null->A", function() {
+  store.load(Post, { id: 1, title: "Ohai", body: "FIRST POST ZOMG" });
+  store.load(Comment, { id: 1, body: "Kthx" });
+
+  var post = store.find(Post, 1);
+  var comment = store.find(Comment, 1);
+
+  var transaction = store.transaction();
+
+  transaction.add(post);
+  transaction.add(comment);
+
+  post.get('comments').pushObject(comment);
+
+  var relationships = transaction.dirtyRelationships;
+
+  deepEqual(relationships.byChild.get(comment), [ { oldParent: null, newParent: post, child: comment } ]);
+  deepEqual(relationships.byNewParent.get(post), [ { oldParent: null, newParent: post, child: comment } ]);
+});
+
+test("If a child is removed from a parent, a dirty relationship is added to the transaction A->null", function() {
+  store.load(Comment, { id: 1, body: "Kthx" });
+  store.load(Post, { id: 1, title: "Ohai", body: "FIRST POST ZOMG", comments: [ 1 ] });
+
+  var post = store.find(Post, 1);
+  var comment = store.find(Comment, 1);
+
+  var transaction = store.transaction();
+
+  transaction.add(post);
+  transaction.add(comment);
+
+  post.get('comments').removeObject(comment);
+
+  var relationships = transaction.dirtyRelationships;
+
+  deepEqual(relationships.byChild.get(comment), [ { oldParent: post, newParent: null, child: comment } ]);
+  deepEqual(relationships.byOldParent.get(post), [ { oldParent: post, newParent: null, child: comment } ]);
+});
+
+test("If a child is removed from a parent it was recently added to, the dirty relationship is removed. null->A, A->null", function() {
+  store.load(Comment, { id: 1, body: "Kthx" });
+  store.load(Post, { id: 1, title: "Ohai", body: "FIRST POST ZOMG", comments: [ 1 ] });
+
+  var post = store.find(Post, 1);
+  var comment = store.find(Comment, 1);
+
+  var transaction = store.transaction();
+
+  transaction.add(post);
+  transaction.add(comment);
+
+  post.get('comments').removeObject(comment);
+  post.get('comments').pushObject(comment);
+
+  var relationships = transaction.dirtyRelationships;
+
+  deepEqual(relationships.byChild.get(comment), [ ]);
+  deepEqual(relationships.byOldParent.get(post), [ ]);
+});
+
+test("If a child was added to one parent, and then another, the changes coalesce. A->B, B->C", function() {
+  store.load(Comment, { id: 1, body: "Kthx" });
+  store.load(Post, { id: 1, title: "Ohai", body: "FIRST POST ZOMG", comments: [ 1 ] });
+  store.load(Post, { id: 2, title: "ZOMG", body: "SECOND POST WAT" });
+  store.load(Post, { id: 3, title: "ORLY?", body: "Why am I still here?" });
+
+  var post = store.find(Post, 1);
+  var post2 = store.find(Post, 2);
+  var post3 = store.find(Post, 3);
+  var comment = store.find(Comment, 1);
+
+  var transaction = store.transaction();
+
+  transaction.add(post);
+  transaction.add(comment);
+
+  post.get('comments').removeObject(comment);
+  post2.get('comments').pushObject(comment);
+  post2.get('comments').removeObject(comment);
+  post3.get('comments').pushObject(comment);
+
+  var relationships = transaction.dirtyRelationships;
+
+  deepEqual(relationships.byChild.get(comment), [ { child: comment, oldParent: post, newParent: post3 } ]);
+  deepEqual(relationships.byOldParent.get(post), [ { child: comment, oldParent: post, newParent: post3 } ]);
+  deepEqual(relationships.byNewParent.get(post3), [ { child: comment, oldParent: post, newParent: post3 } ]);
 });
 

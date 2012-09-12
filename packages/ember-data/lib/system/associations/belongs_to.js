@@ -1,4 +1,4 @@
-var get = Ember.get, set = Ember.set, getPath = Ember.getPath,
+var get = Ember.get, set = Ember.set,
     none = Ember.none;
 
 var embeddedFindRecord = function(store, type, data, key, one) {
@@ -23,12 +23,12 @@ var hasAssociation = function(type, options, one) {
         store = get(this, 'store');
 
     if (typeof type === 'string') {
-      type = getPath(this, type, false) || getPath(window, type);
+      type = get(this, type, false) || get(window, type);
     }
 
     if (arguments.length === 2) {
       key = options.key || get(this, 'namingConvention').foreignKey(key);
-      this.send('setAssociation', { key: key, value: value === null ? null : get(value, 'clientId') });
+      this.send('setAssociation', { key: key, value: Ember.none(value) ? null : get(value, 'clientId') });
       //data.setAssociation(key, get(value, 'clientId'));
       // put the client id in `key` in the data hash
       return value;
@@ -52,6 +52,6 @@ var hasAssociation = function(type, options, one) {
 };
 
 DS.belongsTo = function(type, options) {
-  ember_assert("The type passed to DS.belongsTo must be defined", !!type);
+  Ember.assert("The type passed to DS.belongsTo must be defined", !!type);
   return hasAssociation(type, options);
 };

@@ -11,7 +11,7 @@
  the given record orrecord arrayay changes state appropriately.
 */
 
-var get = Ember.get, set = Ember.set, getPath = Ember.getPath;
+var get = Ember.get, set = Ember.set;
 var Person, store, adapter;
 
 module("DS.Store and DS.Adapter integration test", {
@@ -44,6 +44,14 @@ test("when a single record is requested, the adapter's find method is called unl
   store.find(Person, 1);
 });
 
+test("when a record is requested but has not yet been loaded, it should report its id", function() {
+  adapter.find = Ember.K;
+
+  var record = store.find(Person, 1);
+  equal(get(record, 'id'), 1, "should report its id while loading");
+});
+
+
 test("when multiple records are requested, the adapter's findMany method is called", function() {
   expect(1);
 
@@ -67,6 +75,47 @@ test("when multiple records are requested, the adapter's find method is called m
 
   store.findMany(Person, [1,2,3]);
   store.findMany(Person, [1,2,3]);
+});
+
+test("when an association is loaded, the adapter's find method should not be called if all its IDs are already loaded", function() {
+  expect(0);
+
+  adapter.findMany = function() {
+    ok(false, "The adapter's find method should not be called");
+  };
+
+  Person = DS.Model.extend({
+    updatedAt: DS.attr('string'),
+    name: DS.attr('string')
+  });
+
+  var Comment = DS.Model.extend({
+    person: DS.belongsTo(Person)
+  });
+
+  Person.reopen({
+    comments: DS.hasMany(Comment)
+  });
+
+  store.load(Person, { id: 1, comments: [ 1 ] });
+  store.load(Comment, { id: 1 });
+
+  var person = store.find(Person, 1);
+
+  person.get('comments');
+
+  store.load(Person, { id: 1, comments: [ 1 ] });
+});
+
+test("when a store already has all needed records records, it should not call findMany on the adapter", function() {
+  expect(0);
+
+  adapter.find = function(store, type, id) {
+    ok(false, "This should not be called");
+  };
+
+  store.load(Person, { id: 1 });
+  store.findMany(Person, [ 1 ]);
 });
 
 test("when many records are requested with query parameters, the adapter's findQuery method is called", function() {
@@ -170,9 +219,7 @@ test("if an adapter implements the generateIdForRecord method, it gets invoked w
 
   equal(comment.toJSON().post_id, "id-2", "assigned id is immediately available in JSON form of record");
 
-  Ember.run(function() {
-    store.commit();
-  });
+  store.commit();
 });
 
 test("when a store is committed, the adapter's commit method is called with updates", function() {
@@ -569,20 +616,29 @@ test("if a created record is marked as invalid by the server, it enters an error
   };
 
   var yehuda = store.createRecord(Person, { id: 1, name: "Yehuda Katz" });
+
+  var hasNameError,
+      observer = function() { hasNameError = yehuda.get('errors.name'); };
+
+  Ember.addObserver(yehuda, 'errors.name', observer);
+
   store.commit();
 
   equal(get(yehuda, 'isValid'), false, "the record is invalid");
+  ok(hasNameError, "should trigger errors.name observer on invalidation");
 
   set(yehuda, 'updatedAt', true);
   equal(get(yehuda, 'isValid'), false, "the record is still invalid");
 
+  // This tests that we handle undefined values without blowing up
   var errors = get(yehuda, 'errors');
-  errors['other_bound_property'] = undefined;
+  set(errors, 'other_bound_property', undefined);
   set(yehuda, 'errors', errors);
   set(yehuda, 'name', "Brohuda Brokatz");
 
   equal(get(yehuda, 'isValid'), true, "the record is no longer invalid after changing");
   equal(get(yehuda, 'isDirty'), true, "the record has outstanding changes");
+  ok(!hasNameError, "should trigger errors.name observer on validation");
 
   equal(get(yehuda, 'isNew'), true, "precond - record is still new");
 
@@ -590,7 +646,7 @@ test("if a created record is marked as invalid by the server, it enters an error
   equal(get(yehuda, 'isValid'), true, "record remains valid after committing");
   equal(get(yehuda, 'isNew'), false, "record is no longer new");
 
-  // Test key mapping
+  Ember.removeObserver(yehuda, 'errors.name', observer);
 });
 
 test("if an updated record is marked as invalid by the server, it enters an error state", function() {
@@ -658,4 +714,44 @@ test("the filter method can optionally take a server query as well", function() 
 
   equal(get(filter, 'length'), 1, "The filter has an item in it");
   deepEqual(filter.toArray(), [ tom ], "The filter has a single entry in it");
+});
+
+test("can rollback after sucessives updates", function() {
+  store.load(Person, 1, {name: "Paul Chavard"});
+  store.set('adapter', 'App.adapter');
+  adapter.updateRecord = function(store, type, record) {
+    store.didUpdateRecord(record);
+  };
+  // Expose the adapter to global namespace
+  window.App = {adapter: adapter};
+
+  var person = store.find(Person, 1);
+
+  equal(person.get('name'), "Paul Chavard", "person has a name defined");
+
+  person.set('name', 'Paul Bro');
+
+  equal(person.get('name'), "Paul Bro", "person changed the name");
+
+  person.get('transaction').rollback();
+
+  equal(person.get('name'), "Paul Chavard", "person name is back to Paul Chavard");
+
+  person.set('name', 'Paul Bro');
+  equal(person.get('name'), "Paul Bro", "person changed the name");
+  equal(person.get('isDirty'), true, "person is dirty");
+
+  person.get('transaction').commit();
+
+  equal(person.get('isDirty'), false, "person is not dirty");
+  equal(person.get('name'), "Paul Bro", "person changed the name");
+
+  person.set('name', 'Paul BroBro');
+  equal(person.get('name'), "Paul BroBro", "person changed the name again");
+  equal(person.get('isDirty'), true, "person is dirty");
+
+  person.get('transaction').rollback();
+
+  equal(person.get('isDirty'), false, "person is not dirty");
+  equal(person.get('name'), "Paul Bro", "person changed the name back to Paul Bro");
 });
